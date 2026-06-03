@@ -62,10 +62,16 @@ module OddParity
         for i in 1:max_iter
             if abs(f1) < tol return p0_1 end
             p0_new = p0_1 - f1 * (p0_1 - p0_0) / (f1 - f0)
+            
+            # Prevent unphysical negative pressure from secant method mathematically overshooting!
+            if p0_new <= 0.0
+                p0_new = p0_1 / 2.0
+            end
+            
             p0_0 = p0_1; f0 = f1; p0_1 = p0_new
             f1 = target_compactness_func(p0_1, target_C)
         end
-        return p0_1
+        error("Secant method failed to converge for target compactness $target_C. Target likely exceeds the EOS theoretical maximum compactness.")
     end
 
     # --------------------------------------------------------------------------
@@ -138,7 +144,7 @@ module OddParity
         du[2] = drdx * h_double_prime
     end
 
-    function solve_odd(p0_val::T, l::Int, omega::T)
+    function solve_odd(p0_val::T, l::Int, omega::Number)
         tov = solve_tov(p0_val)
         x0, xf, sol = tov.x0, tov.xf, tov.sol
         r0 = sol(x0)[1]
@@ -176,6 +182,91 @@ module OddParity
         
         return (; sol=odd_sol, tov)
     end
+
+    function eval_h_ratio(p0_val::T, l::Int, omega::Number)
+        res = solve_odd(p0_val, l, omega)
+        h_R, hp_R = res.sol.u[end]
+        return hp_R / h_R
+    end
+
+    function eval_zeta(p0_val::T, l::Int, omega::Number)
+        res = solve_odd(p0_val, l, omega)
+        h_R, hp_R = res.sol.u[end]
+        R = res.tov.R_tov
+        M = res.tov.M_tov
+        
+        # Evaluate constants at R
+        e_nu = 1.0 - 2.0 * M / R
+        e_lam = 1.0 / e_nu
+        Λl = T(l^2 + l - 2)
+        
+        om2 = omega^2
+        R2 = R^2
+        
+        # RW Denominator mapping and its derivative
+        D_R = Λl * e_nu - om2 * R2
+        D_prime_R = 2.0 * M * Λl / R2 - 2.0 * om2 * R
+        
+        # Second derivative h''(R) using exterior vacuum Eq 53 exactly (ε=p=0 at boundary)
+        A_surf = (R * om2 * (e_lam - 3.0)) / D_R
+        B_surf = (2.0 * (Λl * e_nu + 2.0 * om2 * R2) + 
+                  e_lam^2 * (Λl^2 * e_nu^2 - 2.0 * om2 * R2 * e_nu * (Λl + 1.0) + om2^2 * R2^2)) / (R2 * D_R)
+        
+        hpp_R = A_surf * hp_R + B_surf * h_R
+        
+        # Zeta Factor: Z_RW = f(r) * g(r) => (Z'/Z) = f'/f + g'/g
+        # The complex amplitude matches cancel completely from the ratio!
+        nu_prime_R = 2.0 * M / (R^2 * e_nu)
+        f_ratio = 1.0 / R + nu_prime_R - D_prime_R / D_R
+        
+        g_R = hp_R - 2.0 * h_R / R
+        g_prime_R = hpp_R - 2.0 * hp_R / R + 2.0 * h_R / R2
+        g_ratio = g_prime_R / g_R
+        
+        zeta = 2.0 * M * (f_ratio + g_ratio)
+        
+        return zeta
+    end
+
+    function eval_response_BA(p0_val::T, l::Int, omega::Number)
+        res = solve_odd(p0_val, l, omega)
+        h_R, hp_R = res.sol.u[end]
+        R = res.tov.R_tov
+        M = res.tov.M_tov
+        
+        # Evaluate constants at R
+        e_nu = 1.0 - 2.0 * M / R
+        e_lam = 1.0 / e_nu
+        Λl = T(l^2 + l - 2)
+        
+        om2 = omega^2
+        R2 = R^2
+        
+        # RW Denominator mapping and its derivative
+        D_R = Λl * e_nu - om2 * R2
+        D_prime_R = 2.0 * M * Λl / R2 - 2.0 * om2 * R
+        
+        # Second derivative h''(R) using exterior vacuum Eq 53 exactly (ε=p=0 at boundary)
+        A_surf = (R * om2 * (e_lam - 3.0)) / D_R
+        B_surf = (2.0 * (Λl * e_nu + 2.0 * om2 * R2) + 
+                  e_lam^2 * (Λl^2 * e_nu^2 - 2.0 * om2 * R2 * e_nu * (Λl + 1.0) + om2^2 * R2^2)) / (R2 * D_R)
+        
+        hpp_R = A_surf * hp_R + B_surf * h_R
+        
+        # Zeta Factor: Z_RW = f(r) * g(r) => (Z'/Z) = f'/f + g'/g
+        nu_prime_R = 2.0 * M / (R^2 * e_nu)
+        f_ratio = 1.0 / R + nu_prime_R - D_prime_R / D_R
+        
+        g_R = hp_R - 2.0 * h_R / R
+        g_prime_R = hpp_R - 2.0 * hp_R / R + 2.0 * h_R / R2
+        g_ratio = g_prime_R / g_R
+        
+        Z_ratio = f_ratio + g_ratio
+        
+        # B/A response
+        BA = R^5 * (3.0 - R * Z_ratio) / (R * Z_ratio + 2.0)
+        return BA
+    end
 end
 
 using .OddParity
@@ -199,7 +290,8 @@ try
     println("  h(R)  = ", u_surf[1])
     println("  h'(R) = ", u_surf[2])
     
-    # Zeta computation logic to be developed using QNM boundary conditions!
+    zeta_odd = OddParity.eval_zeta(p0_c14, l, omega)
+    println("Odd Parity Zeta = ", zeta_odd)
 catch e
     println("Error evaluating odd parity integration! ", e)
     rethrow(e)
